@@ -119,6 +119,9 @@ def main():
     # Fetch historical stock data
     stock_data = get_stock_data(stock_symbol, start_date, end_date)
 
+    commission_rate = 0.0003  # Commission rate for each trade (0.03%)
+    stamp_duty_rate = 0.001  # Stamp duty rate for each trade (0.1%)
+
     # Generate trade signals based on moving averages
     stock_data = genTradeSignal(stock_data)
 
@@ -145,7 +148,7 @@ def main():
             hands_to_buy = int(cash // (price * 100))
             if hands_to_buy > 0:
                 hold += hands_to_buy * 100  # Update holdings
-                cash -= hands_to_buy * price * 100  # Deduct the cost from cash
+                cash -= hands_to_buy * price * 100 * (1 + commission_rate )  # Deduct the cost from cash
                 buy_trade_records.append({
                     'date': stock_data.index[i],
                     'type': 'BUY',
@@ -156,7 +159,7 @@ def main():
                 print(f"Buy {hands_to_buy * 100} shares at {price} CNY on {stock_data.index[i].date()}")
         elif stock_data['Position'].iloc[i] == -1 and hold > 0:  # Sell signal and holdings
             
-            cash += hold * price   # Add the proceeds to cash
+            cash += hold * price * (1 - commission_rate - stamp_duty_rate)  # Add the proceeds to cash
             sell_trade_records.append({
                 'date': stock_data.index[i],
                 'type': 'SELL',

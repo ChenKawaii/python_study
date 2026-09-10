@@ -214,7 +214,7 @@ def main():
     sharpe_ratio = (annual_return - risk_free_rate) / annual_volatility if annual_volatility != 0 else np.nan
 
 
-    # Calculate the MMD (Maximum Drawdown), which is a measure of the largest single drop from peak to trough in the value of a portfolio before a new peak is achieved.
+    # Calculate the MDD (Maximum Drawdown), which is a measure of the largest single drop from peak to trough in the value of a portfolio before a new peak is achieved.
     # It is calculated as the maximum difference between the cumulative return and its running maximum,
     # divided by the running maximum. This gives an indication of the worst-case loss an investor could have experienced during the investment period.
     # and please note that the highest point must come before the lowest point
@@ -226,17 +226,18 @@ def main():
     3           80     110 -0.272727
     4          120     120  0.000000
     5          100     120 -0.166667
-    6           70     120 -0.416667  ← MMD (Maximum Drawdown) occurs here, as the portfolio dropped from a peak of 120 to a trough of 70, resulting in a drawdown of -0.416667 or -41.67%.
+    6           70     120 -0.416667  ← MDD (Maximum Drawdown) occurs here, as the portfolio dropped from a peak of 120 to a trough of 70, resulting in a drawdown of -0.416667 or -41.67%.
     """
 
     stock_data['running_max'] = stock_data['Total Assets'].cummax() # also can use stock_data['Total Assets'].expanding().max() to calculate the running maximum of total assets
     stock_data['drawdown'] = stock_data['Total Assets'] - stock_data['running_max']
     stock_data['drawdown_pct'] = stock_data['drawdown'] / stock_data['running_max']
-    max_drawdown = stock_data['drawdown_pct'].max()  # The maximum draw
+    max_drawdown = stock_data['drawdown_pct'].min()  # The maximum draw
 
 
     # Calculate the win rate, which is the ratio of winning trades to the total number of trades executed.
-    for i in range(len(buy_trade_records)):
+    pair_count = min(len(buy_trade_records), len(sell_trade_records))  # Ensure we only compare pairs of buy and sell trades
+    for i in range(pair_count):
         buy_price = buy_trade_records[i]['price']
         sell_price = sell_trade_records[i]['price'] if i < len(sell_trade_records) else None
 
@@ -251,15 +252,15 @@ def main():
     profit_factor = avg_win / avg_loss if avg_loss != 0 else np.nan
     win_rate = win_count / (win_count + loss_count) if (win_count + loss_count) != 0 else np.nan
 
-    # Output the DataFrame with trade signals to a CSV file
+    # Output the DataFrame
     print(f"\n{'='*50}")
-    print(f"Total signals generated: {total_signals} times")
+    print(f"Total buy/sell signals generated: {total_signals} times")
     print(f"Total trades executed: {total_executed} times")
     print(f"Final price: {stock_data['close'].iloc[-1]:.2f} CNY")
     print(f"Final total assets: {stock_data['Total Assets'].iloc[-1]:.2f} CNY")
     print(f'Final cumulative return: {stock_data["Cumulative Return"].iloc[-1] * 100:.2f}%')
     print(f'Final Sharpe Ratio: {sharpe_ratio:.2f}')
-    print(f'Final Maximum Drawdown (MMD): {max_drawdown * 100:.2f}%')
+    print(f'Final Maximum Drawdown (MDD): {max_drawdown * 100:.2f}%')
     print(f'Final Profit Factor: {profit_factor:.2f}')
     print(f'Final Win Rate: {win_rate * 100:.2f}%')
     # if trade_records:

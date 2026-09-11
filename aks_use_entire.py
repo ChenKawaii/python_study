@@ -5,7 +5,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# AI根据aks_use.py生成
 
 # ============================================================
 # 1. 数据获取
@@ -187,8 +186,8 @@ def compare_params(df, param_pairs) -> pd.DataFrame:
 # ============================================================
 def main():
     stock_symbol = 'sh600519'
-    start_date = '2023-01-01'
-    end_date = '2024-01-01'
+    start_date = '2025-01-01'
+    end_date = '2026-01-01'
 
     stock_data = get_stock_data(stock_symbol, start_date, end_date)
 

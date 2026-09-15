@@ -33,6 +33,8 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
 
     Returns:
     pd.DataFrame: 新增 MA_short / MA_long / Signal / Position 列
+
+    #2026/9/15 新增+DM/-DM/ADX指标 便于后续策略优化
     """
     df = df.copy()  # 避免修改原始数据
 
@@ -45,6 +47,80 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
     )
     df['Position'] = df['Signal'].diff()  # +1 买入，-1 卖出
 
+    # +DM, -DM, ADX指标计算
+    # high_diff 相当于今天的最高价减去昨天的最高价，low_diff 相当于昨天的最低价减去今天的最低价
+    df['high_diff'] = df['high'].diff()
+    # low_diff 相当于昨天的最低价减去今天的最低价
+    df['low_diff'] = -df['low'].diff()
+
+    # +DM 和 -DM 的计算逻辑是：
+    # 如果今天的最高价比昨天的最高价高，并且这个差值大于最低价的差值，那么 +DM 就等于最高价的差值，否则为 0。
+    df['+DM'] = np.where((df['high_diff'] > df['low_diff']) & (df['high_diff'] > 0), df['high_diff'], 0)
+
+    # 如果昨天的最低价比今天的最低价低，并且这个差值大于最高价的差值，那么 -DM 就等于最低价的差值，否则为 0。
+    df['-DM'] = np.where((df['low_diff'] > df['high_diff']) & (df['low_diff'] > 0), df['low_diff'], 0)
+
+    # TR (True Range) TR 衡量的是今天价格波动的"真实幅度"，
+    # 它不只考虑今天的最高最低，还考虑了昨天收盘价，防止跳空缺口被忽略
+    # 它的计算逻辑是：
+    #
+    # 取今天的最高最低价的差值HL
+    # 取今天的最高价和昨天的收盘价的差值HC
+    # 取昨天的收盘价和今天的最低价的差值LC
+    df['HL'] = df['high'] - df['low']
+    df['HC'] = abs(df['high'] - df['close'].shift(1))
+    df['LC'] = abs(df['close'].shift(1) - df['low'])
+    df['TR'] = df[['HL', 'HC', 'LC']].max(axis=1)
+
+    # 得到的±DM和TR是每日的值，噪音（波动）较大，需要进行平滑处理。
+    # 这里使用 Wilder's 平滑方法，类似于指数移动平均，但权重不同。
+    """
+    平滑处理就是把每天波动的 TR、+DM、-DM 用 Wilder 方法"揉"成更稳定的值，
+    再算出 +DI 和 -DI。这样得到的 ADX 才能真实反映趋势强度，而不是被单日波动忽悠
+    """
+    # 今日平滑值 = 昨日平滑值 + (今日原始值 - 昨日平滑值) / N
+    # 其中 N 是平滑周期，通常取 14。
+
+    period = 14
+    df['+DM_smooth'] = df['+DM'].ewm(alpha=1/period, adjust=False).mean()
+    df['-DM_smooth'] = df['-DM'].ewm(alpha=1/period, adjust=False).mean()
+    df['TR_smooth'] = df['TR'].ewm(alpha=1/period, adjust=False).mean()
+
+    df['+DI'] = 100 * (df['+DM_smooth'] / df['TR_smooth'])
+    df['-DI'] = 100 * (df['-DM_smooth'] / df['TR_smooth'])
+
+
+    # 计算 DX 和 ADX
+    # DX (Directional Movement Index) 衡量的是趋势的强弱，它的计算逻辑是：
+    # 取 +DI 和 -DI 的差值的绝对值，除以它们的和，再乘以 100。
+    """
+    直观理解
+    情况	   +DI -DI	DX	            含义
+    多头碾压	40	5	100*35/45 ≈ 78	趋势极强（向上）
+    空头碾压	3	45	100*42/48 ≈ 88	趋势极强（向下）
+    势均力敌	20	18	100*2/38 ≈ 5	几乎没趋势
+    """
+    df['DX'] = 100 * (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI']))
+
+    # ADX(Average Directional Index) 是 DX 的平滑值，衡量趋势强度。
+    # DX 是基于 +DI 和 -DI 算出来的，而 +DI/-DI 已经平滑过一次了。
+    # 但 DX 本身仍然会有波动，再平滑一次，让 ADX 更稳定、更能反映中期趋势强度。
+    df['ADX'] = df['DX'].ewm(alpha=1/period, adjust=False).mean()
+
+    """
+    DX 和 ADX 的区别
+    指标	 含义	        特点
+    DX	    当天多空差距	波动大，反应快
+    ADX	    DX 的平滑平均	稳定，反映中期趋势强度
+    """
+
+    """
+    ADX            含义
+    <20            趋势弱，震荡行情
+    25~40          趋势明确 顺势交易胜率高
+    40~60          趋势强 行情单边
+    >60            趋势火热 存在反转风险
+    """
     return df
 
 
@@ -54,13 +130,12 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
 def run_backtest(df, short_window=5, long_window=20,
                  initial_cash=5_000_000,
                  commission_rate=0.0003,
-                 stamp_duty_rate=0.001) -> dict:
+                 stamp_duty_rate=0.001,
+                 use_adx_filter=False,
+                 adx_threshold=25) -> dict:
     """
-    执行回测，返回绩效指标和交易记录。
-
-    Returns:
-    dict: 含 total_assets, cumulative_return, sharpe_ratio,
-          max_drawdown, win_rate, profit_factor, trades 等
+    use_adx_filter: 是否启用 ADX 过滤
+    adx_threshold: ADX 阈值
     """
     df = gen_trade_signal(df, short_window, long_window)
 
@@ -77,7 +152,13 @@ def run_backtest(df, short_window=5, long_window=20,
             continue
 
         # 买入信号
-        if df['Position'].iloc[i] == 1 and cash > 100 * price:
+        buy_condition = df['Position'].iloc[i] == 1 and cash > 100 * price
+        if use_adx_filter:
+            buy_condition = (buy_condition 
+                           and df['ADX'].iloc[i] > adx_threshold
+                           and df['+DI'].iloc[i] > df['-DI'].iloc[i])
+        
+        if buy_condition:
             hands = int(cash // (price * 100))
             if hands > 0:
                 hold += hands * 100
@@ -87,7 +168,7 @@ def run_backtest(df, short_window=5, long_window=20,
                     'shares': hands * 100
                 })
 
-        # 卖出信号
+        # 卖出信号：死叉就卖，不加 ADX 条件
         elif df['Position'].iloc[i] == -1 and hold > 0:
             cash += hold * price * (1 - commission_rate - stamp_duty_rate)
             sell_trades.append({
@@ -100,12 +181,10 @@ def run_backtest(df, short_window=5, long_window=20,
     df['Total Assets'] = total_assets
     df['Cumulative Return'] = df['Total Assets'] / initial_cash - 1
 
-    # ---- 绩效指标 ----
     perf = calc_performance(df, buy_trades, sell_trades, initial_cash)
     perf['trades'] = {'buy': buy_trades, 'sell': sell_trades}
     perf['df'] = df
     return perf
-
 
 # ============================================================
 # 4. 绩效计算（独立函数，便于复用）
@@ -212,6 +291,22 @@ def main():
     # 保存对比表到 CSV（方便贴到 README）
     comparison.to_csv('param_comparison.csv', index=False, encoding='utf-8-sig')
     print("\n对比表已保存至 param_comparison.csv")
+
+    # 基准版
+    perf_base = run_backtest(stock_data, 5, 20, use_adx_filter=False)
+    print(f"基准版 MA5/MA20: 收益={perf_base['cumulative_return']*100:.2f}%, "
+        f"夏普={perf_base['sharpe_ratio']:.2f}, 交易次数={perf_base['total_trades']}")
+
+    # ADX 过滤版
+    perf_adx = run_backtest(stock_data, 5, 20, use_adx_filter=True)
+    print(f"\n{'='*60}")
+    print(f"ADX过滤版 MA5/MA20 完整绩效：")
+    print(f"累计收益率: {perf_adx['cumulative_return']*100:.2f}%")
+    print(f"夏普比率: {perf_adx['sharpe_ratio']:.2f}")
+    print(f"最大回撤: {perf_adx['max_drawdown']*100:.2f}%")
+    print(f"胜率: {perf_adx['win_rate']*100:.2f}%")
+    print(f"盈亏比: {perf_adx['profit_factor']:.2f}")
+    print(f"交易次数: {perf_adx['total_trades']}")
 
 
 if __name__ == "__main__":

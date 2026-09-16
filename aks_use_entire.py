@@ -194,9 +194,43 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
     df['RSI'] = 100 - (100 / (1 + df['RS']))
     return df
 
+# ============================================================
+# 3. 画交易信号图
+# ============================================================
+def plot_trade_signals(df, stock_symbol, stock_name, short_window=5, long_window=20):
+    """
+    Plot the stock price along with moving averages and trade signals.
+
+    Parameters:
+    df (pd.DataFrame): The DataFrame containing historical stock data and trade signals.
+    stock_symbol (str): The stock symbol for labeling the plot.
+    """
+    try:
+        plt.figure(figsize=(14, 7))
+        plt.plot(df.index, df['close'], label='Close Price', color='blue')
+        plt.plot(df.index, df[f'MA{long_window}'], label=f'{long_window}-Day MA', color='orange')
+        plt.plot(df.index, df[f'MA{short_window}'], label=f'{short_window}-Day MA', color='green')
+
+        buy_signals = df[df['Position'] == 1]
+        plt.scatter(buy_signals.index, buy_signals['close'], label='Buy Signal', marker='^', color='g', s=100)
+
+        sell_signals = df[df['Position'] == -1]
+        plt.scatter(sell_signals.index, sell_signals['close'], label='Sell Signal', marker='v', color='r', s=100)
+
+        plt.title(f'{stock_name} ({stock_symbol}) Price and Trade Signals')
+        plt.xlabel('Date')
+        plt.ylabel('Price(CNY)')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.savefig(f'{stock_symbol}_{stock_name}_trading_signals.png')  
+        print(f"Plot saved as {stock_symbol}_{stock_name}_trading_signals.png")
+        plt.close()  
+    except Exception as e:
+        print(f"Plotting error: {e}")
+
 
 # ============================================================
-# 3. 回测引擎（封装交易逻辑）
+# 4. 回测引擎（封装交易逻辑）
 # ============================================================
 def run_backtest(df, short_window=5, long_window=20,
                  initial_cash=5_000_000,
@@ -272,7 +306,7 @@ def run_backtest(df, short_window=5, long_window=20,
     return perf
 
 # ============================================================
-# 4. 绩效计算（独立函数，便于复用）
+# 5. 绩效计算（独立函数，便于复用）
 # ============================================================
 def calc_performance(df, buy_trades, sell_trades, initial_cash) -> dict:
     """计算夏普比率、最大回撤、胜率、盈亏比"""
@@ -317,7 +351,7 @@ def calc_performance(df, buy_trades, sell_trades, initial_cash) -> dict:
 
 
 # ============================================================
-# 5. 参数对比（核心新增功能）
+# 6. 参数对比（核心新增功能）
 # ============================================================
 def compare_params(df, param_pairs) -> pd.DataFrame:
     """
@@ -346,7 +380,7 @@ def compare_params(df, param_pairs) -> pd.DataFrame:
 
 
 # ============================================================
-# 6. 主程序
+# 7. 主程序
 # ============================================================
 def main():
     stock_list = {
@@ -371,7 +405,8 @@ def main():
         end_date = '2026-01-01'
 
         stock_data = get_stock_data(stock_symbol, start_date, end_date)
-
+        signal_data = gen_trade_signal(stock_data, short_window=5, long_window=20)
+        plot_trade_signals(signal_data, stock_symbol, stock_name, short_window=5, long_window=20)
 
         # ---- 单次回测（保留原有功能）----
         perf = run_backtest(stock_data, short_window=5, long_window=20)

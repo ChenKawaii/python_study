@@ -35,6 +35,10 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
     pd.DataFrame: 新增 MA_short / MA_long / Signal / Position 列
 
     #2026/9/15 新增+DM/-DM/ADX指标 便于后续策略优化
+    
+    #2026/9/16 新增成交量过滤 优化买卖策略
+
+    #2026/9/16 新增RSI过滤 优化买卖策略
     """
     df = df.copy()  # 避免修改原始数据
 
@@ -121,6 +125,73 @@ def gen_trade_signal(df, short_window=5, long_window=20) -> pd.DataFrame:
     40~60          趋势强 行情单边
     >60            趋势火热 存在反转风险
     """
+
+    # 计算过去20日平均成交量
+    # 上涨需要成交量配合（放量上涨才可信），
+    # 下跌不一定需要（缩量下跌也可能是正常调整）。
+    # 所以，买入信号通常要求成交量放大，卖出信号不一定要求。
+    # df['volume'] 是当天的成交量
+
+    df['Volume_MA20'] = df['volume'].rolling(window=20).mean()
+
+    # 今天成交量是过去20天平均的1.5倍以上 → 明显放量
+    # 过滤条件： 今日成交量 > 过去20日成交均量的1.5倍
+    df['Volume_Filter'] = df['volume'] > 1.5 * df['Volume_MA20']
+
+    # 新增RSI(Relative Strength Index)指标计算
+    # RSI 是一种动量指标，用于衡量价格的超买或超卖状态。
+    # 通俗理解：
+    # 最近N天里，涨的日子涨了多少，跌的日子跌了多少？
+    # 如果涨的力量远大于跌的力量，RSI就高；反之RSI就低。
+
+    """
+    数值范围：0 ~ 100
+    RSI     数值	含义	市场状态
+    > 70	超买	涨得太猛，可能回调
+    50 ~ 70	偏强	多头占优
+    50	    多空均衡	中性
+    30 ~ 50	偏弱	空头占优
+    < 30	超卖	跌得太狠，可能反弹
+
+    假设最近5天涨跌情况：
+
+    日期	涨跌	上涨	下跌
+    第1天	+2	2	0
+    第2天	+3	3	0
+    第3天	-1	0	1
+    第4天	+2	2	0
+    第5天	-1	0	1
+    计算：
+
+    平均上涨 = (2+3+0+2+0) / 5 = 1.4
+
+    平均下跌 = (0+0+1+0+1) / 5 = 0.4
+
+    RS = 1.4 / 0.4 = 3.5
+
+    RSI = 100 - 100/(1+3.5) = 77.8（超买）
+
+    解读：涨的力量远大于跌的力量，RSI接近80，说明近期涨得太猛，可能回调。
+    """
+
+    df['change'] = df['close'].diff()
+    # 上涨：今天比昨天涨了多少（跌的日子记0）
+    df['gain'] = np.where(df['change'] > 0, df['change'], 0)
+
+    # 下跌：今天比昨天跌了多少（涨的日子记0，取正值）
+    df['loss'] = np.where(df['change'] < 0, -df['change'], 0)
+
+    # 计算平均上涨和平均下跌
+    period = 14
+    df['avg_gain'] = df['gain'].ewm(alpha=1/period, adjust=False).mean()
+    df['avg_loss'] = df['loss'].ewm(alpha=1/period, adjust=False).mean()
+
+    # 计算RS（Relative Strength）
+    df['RS'] = df['avg_gain'] / df['avg_loss']
+
+    # 计算RSI
+    # RSI = 100 × 平均上涨 / (平均上涨 + 平均下跌)
+    df['RSI'] = 100 - (100 / (1 + df['RS']))
     return df
 
 
@@ -132,10 +203,17 @@ def run_backtest(df, short_window=5, long_window=20,
                  commission_rate=0.0003,
                  stamp_duty_rate=0.001,
                  use_adx_filter=False,
-                 adx_threshold=25) -> dict:
+                 adx_threshold=25,
+                 use_rsi_filter=False,
+                 low_rsi_threshold=50,
+                 high_rsi_threshold=70,
+                 use_volume_filter=False) -> dict:
     """
-    use_adx_filter: 是否启用 ADX 过滤
+    use_adx_rsi_filter: 是否启用 ADX+RSI 过滤
     adx_threshold: ADX 阈值
+    low_rsi_threshold: RSI 低阈值
+    high_rsi_threshold: RSI 高阈值
+    use_volume_filter: 是否启用成交量过滤
     """
     df = gen_trade_signal(df, short_window, long_window)
 
@@ -151,13 +229,20 @@ def run_backtest(df, short_window=5, long_window=20,
             total_assets.append(initial_cash)
             continue
 
-        # 买入信号
+        # 买入信号 
         buy_condition = df['Position'].iloc[i] == 1 and cash > 100 * price
-        if use_adx_filter:
+        if use_adx_filter: # 启用 ADX过滤
             buy_condition = (buy_condition 
                            and df['ADX'].iloc[i] > adx_threshold
-                           and df['+DI'].iloc[i] > df['-DI'].iloc[i])
+                           and df['+DI'].iloc[i] > df['-DI'].iloc[i]
+                           and df['RSI'].iloc[i] < high_rsi_threshold)
         
+        if use_volume_filter: # 启用成交量过滤
+            buy_condition = (buy_condition and df['Volume_Filter'].iloc[i])
+
+        if use_rsi_filter: # 启用RSI过滤
+            buy_condition = (buy_condition and df['RSI'].iloc[i] > low_rsi_threshold and df['RSI'].iloc[i] < high_rsi_threshold)
+
         if buy_condition:
             hands = int(cash // (price * 100))
             if hands > 0:
@@ -168,7 +253,7 @@ def run_backtest(df, short_window=5, long_window=20,
                     'shares': hands * 100
                 })
 
-        # 卖出信号：死叉就卖，不加 ADX 条件
+        # 卖出信号：死叉就卖，不加 ADX / RSI条件 和 成交量过滤条件
         elif df['Position'].iloc[i] == -1 and hold > 0:
             cash += hold * price * (1 - commission_rate - stamp_duty_rate)
             sell_trades.append({
@@ -264,49 +349,91 @@ def compare_params(df, param_pairs) -> pd.DataFrame:
 # 6. 主程序
 # ============================================================
 def main():
-    stock_symbol = 'sh600519'
-    start_date = '2025-01-01'
-    end_date = '2026-01-01'
+    stock_list = {
+        'sh600519': '茅台（消费）',
+        'sz000858': '五粮液（消费）',
+        'sh600036': '招行（金融）',
+        'sz002594': '比亚迪（新能源）',
+        'sh601318': '中国平安（保险）',
+        'sz000333': '美的（家电）',
+        'sh600900': '长江电力（公用事业）',
+        'sz300750': '宁德时代（新能源）',
+        'sh601899': '紫金矿业（资源）',
+        'sz000651': '格力（家电）',
+    }
+    #stocks = ['sh600519', 'sz000858', 'sh600036', 'sz002594']
+    for stock_symbol, stock_name in stock_list.items():
+        print(f"\n{'='*60}")
+        print(f"回测股票: {stock_symbol} ({stock_name})")
+    #stock_symbol = 'sh600519'
+    # 2026/9/16 修改开始时间 增长回测周期
+        start_date = '2020-01-01'
+        end_date = '2026-01-01'
 
-    stock_data = get_stock_data(stock_symbol, start_date, end_date)
+        stock_data = get_stock_data(stock_symbol, start_date, end_date)
 
-    # ---- 单次回测（保留原有功能）----
-    perf = run_backtest(stock_data, short_window=5, long_window=20)
-    print(f"\n{'='*60}")
-    print(f"单次回测：MA5/MA20")
-    print(f"累计收益率: {perf['cumulative_return']*100:.2f}%")
-    print(f"夏普比率: {perf['sharpe_ratio']:.2f}")
-    print(f"最大回撤: {perf['max_drawdown']*100:.2f}%")
-    print(f"胜率: {perf['win_rate']*100:.2f}%")
-    print(f"盈亏比: {perf['profit_factor']:.2f}")
 
-    # ---- 参数对比 ----
-    param_pairs = [(5, 20), (10, 30), (5, 60), (10, 60), (20, 60)]
-    comparison = compare_params(stock_data, param_pairs)
+        # ---- 单次回测（保留原有功能）----
+        perf = run_backtest(stock_data, short_window=5, long_window=20)
+        #print(f"\n{'='*60}")
+        print(f"单次回测：MA5/MA20")
+        print(f"累计收益率: {perf['cumulative_return']*100:.2f}%")
+        print(f"夏普比率: {perf['sharpe_ratio']:.2f}")
+        print(f"最大回撤: {perf['max_drawdown']*100:.2f}%")
+        print(f"胜率: {perf['win_rate']*100:.2f}%")
+        print(f"盈亏比: {perf['profit_factor']:.2f}")
 
-    print(f"\n{'='*60}")
-    print("参数对比结果：")
-    print(comparison.to_string(index=False))
+        # ---- 参数对比 ----
+        param_pairs = [(5, 20), (10, 30), (5, 60), (10, 60), (20, 60)]
+        comparison = compare_params(stock_data, param_pairs)
 
-    # 保存对比表到 CSV（方便贴到 README）
-    comparison.to_csv('param_comparison.csv', index=False, encoding='utf-8-sig')
-    print("\n对比表已保存至 param_comparison.csv")
+        print(f"\n{'='*60}")
+        print("参数对比结果：")
+        print(comparison.to_string(index=False))
 
-    # 基准版
-    perf_base = run_backtest(stock_data, 5, 20, use_adx_filter=False)
-    print(f"基准版 MA5/MA20: 收益={perf_base['cumulative_return']*100:.2f}%, "
-        f"夏普={perf_base['sharpe_ratio']:.2f}, 交易次数={perf_base['total_trades']}")
+        # 保存对比表到 CSV（方便贴到 README）
+        comparison.to_csv(f'param_comparison_{stock_symbol}_{stock_name}.csv', index=False, encoding='utf-8-sig')
+        print(f"\n对比表已保存至 param_comparison_{stock_symbol}_{stock_name}.csv")
 
-    # ADX 过滤版
-    perf_adx = run_backtest(stock_data, 5, 20, use_adx_filter=True)
-    print(f"\n{'='*60}")
-    print(f"ADX过滤版 MA5/MA20 完整绩效：")
-    print(f"累计收益率: {perf_adx['cumulative_return']*100:.2f}%")
-    print(f"夏普比率: {perf_adx['sharpe_ratio']:.2f}")
-    print(f"最大回撤: {perf_adx['max_drawdown']*100:.2f}%")
-    print(f"胜率: {perf_adx['win_rate']*100:.2f}%")
-    print(f"盈亏比: {perf_adx['profit_factor']:.2f}")
-    print(f"交易次数: {perf_adx['total_trades']}")
+        # 基准版
+        perf_base = run_backtest(stock_data, 5, 20)
+        print(f"基准版\n收益={perf_base['cumulative_return']*100:.2f}%, "
+                f"夏普={perf_base['sharpe_ratio']:.2f}, "
+                f"回撤={perf_base['max_drawdown']*100:.2f}%, "
+                f"交易次数={perf_base['total_trades']}")
+    
+        # 仅 ADX
+        perf_adx = run_backtest(stock_data, 5, 20, use_adx_filter=True, adx_threshold=25)
+
+        # 仅 RSI
+        perf_rsi = run_backtest(stock_data, 5, 20, use_rsi_filter=True, low_rsi_threshold=50, high_rsi_threshold=70)
+
+        # 仅成交量
+        perf_vol = run_backtest(stock_data, 5, 20, use_volume_filter=True)
+
+        # 打印对比
+        for name, perf in [('基准', perf_base), ('仅ADX', perf_adx), 
+                        ('仅RSI', perf_rsi), ('仅成交量', perf_vol)]:
+            print(f"{name}: 收益={perf['cumulative_return']*100:.2f}%, "
+                f"夏普={perf['sharpe_ratio']:.2f}, "
+                f"回撤={perf['max_drawdown']*100:.2f}%, "
+                f"交易次数={perf['total_trades']}\n")
+        print(f"{'='*60}\n")
+    # 增加多组RSI参数进行对比
+    # for rsi_th in [60, 65, 70, 75, 80]:
+    #     perf = run_backtest(stock_data, 5, 20, use_rsi_filter=True, high_rsi_threshold=rsi_th)
+    #     print(f"HIGH_RSI<{rsi_th}: 收益={perf['cumulative_return']*100:.2f}%, "
+    #         f"夏普={perf['sharpe_ratio']:.2f}, 交易次数={perf['total_trades']}")
+
+    # 增加多组股票进行回测 看不同股票对RSI60过滤的敏感度
+    # stock_list = ['sh600519', 'sz000858', 'sh600036', 'sz002594']
+    # for symbol in stock_list:
+    #     stock_data = get_stock_data(symbol, '2020-01-01', '2026-01-01')
+    #     perf_base = run_backtest(stock_data, 5, 20)
+    #     perf_rsi = run_backtest(stock_data, 5, 20, use_rsi_filter=True, high_rsi_threshold=60)
+    #     print(f"{symbol}: 基准={perf_base['cumulative_return']*100:.2f}%, "
+    #         f"RSI<60={perf_rsi['cumulative_return']*100:.2f}%, "
+    #         f"交易次数={perf_rsi['total_trades']}")
 
 
 if __name__ == "__main__":
